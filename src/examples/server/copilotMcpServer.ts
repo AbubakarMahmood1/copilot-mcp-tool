@@ -138,7 +138,6 @@ async function getCopilotHelpOutput(): Promise<string> {
         let stdout = '';
         let stderr = '';
         let settled = false;
-        let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
         const finish = (fn: () => void) => {
             if (settled) {
@@ -177,7 +176,7 @@ async function getCopilotHelpOutput(): Promise<string> {
             finish(() => resolve(output));
         });
 
-        timeoutId = setTimeout(() => {
+        const timeoutId = setTimeout(() => {
             child.kill();
             finish(() => reject(new Error('Copilot CLI help command timed out')));
         }, HELP_TIMEOUT_MS);
@@ -266,7 +265,6 @@ async function executeCopilotCommand(
         let stderr = '';
         let hasReceivedOutput = false;
         let settled = false;
-        let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
         const finish = (fn: () => void) => {
             if (settled) {
@@ -323,7 +321,7 @@ async function executeCopilotCommand(
         });
 
         // Timeout after 60 seconds
-        timeoutId = setTimeout(() => {
+        const timeoutId = setTimeout(() => {
             child.kill();
 
             if (hasReceivedOutput) {
