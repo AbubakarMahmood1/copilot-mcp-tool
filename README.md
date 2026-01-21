@@ -737,6 +737,7 @@ Environment variables for defaults and logging:
 
 - `COPILOT_MODEL`: default model identifier
 - `COPILOT_TIMEOUT`: timeout in milliseconds (default: 60000)
+- `COPILOT_MAX_PROMPT_BYTES`: maximum prompt size passed to `copilot --prompt` (default: 24000, set `0` to disable)
 - `COPILOT_ALLOW_ALL_TOOLS`: default allow-all-tools policy (`true` or `false`)
 - `COPILOT_LOG_FILE`: write JSON line logs to this file path
 - `COPILOT_LOG_LEVEL`: `debug`, `info`, `warn`, or `error` (default: `info`)
