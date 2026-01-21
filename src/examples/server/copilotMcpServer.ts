@@ -388,7 +388,7 @@ async function executeCopilotCommand(
             return;
         }
 
-        const args: string[] = ['--prompt', fullPrompt, '--silent'];
+        const args: string[] = ['--silent'];
 
         // Add model selection
         if (selectedModel) {
@@ -411,9 +411,10 @@ async function executeCopilotCommand(
         }
 
         const child = spawn(COPILOT_COMMAND, args, {
-            stdio: ['ignore', 'pipe', 'pipe']
+            stdio: ['pipe', 'pipe', 'pipe']
         });
 
+        // Write prompt to stdin (avoids exposing prompt in process args)
         let stdout = '';
         let stderr = '';
         let hasReceivedOutput = false;
@@ -436,6 +437,18 @@ async function executeCopilotCommand(
                 clearTimeout(timeoutId);
             }
         };
+
+        // Handle stdin errors (e.g., EPIPE if process exits before reading)
+        child.stdin.on('error', (error) => {
+            logMessage('debug', 'Stdin write error (process may have exited early)', {
+                error: error.message
+            });
+            // Don't reject here - let the 'exit' handler deal with the actual error
+        });
+
+        // Write prompt to stdin (avoids exposing prompt in process args)
+        child.stdin.write(fullPrompt);
+        child.stdin.end();
 
         logMessage('debug', 'Copilot command started', {
             model: selectedModel,
