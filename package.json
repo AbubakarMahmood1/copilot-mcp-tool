@@ -38,6 +38,7 @@
         "build": "npm run build:esm && npm run build:cjs",
         "build:esm": "node scripts/prepare-esm.js && tsc -p tsconfig.prod.json",
         "build:cjs": "node scripts/prepare-cjs.js && tsc -p tsconfig.cjs.json",
+        "prepare": "npm run build",
         "prepack": "npm run build",
         "prepublishOnly": "npm run build",
         "start": "node dist/esm/examples/server/copilotMcpServer.js",
