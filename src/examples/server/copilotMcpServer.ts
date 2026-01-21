@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { McpServer, ResourceTemplate } from '../../server/mcp.js';
 import { StdioServerTransport } from '../../server/stdio.js';
 import { CallToolResult } from '../../types.js';
-import { mkdir } from 'fs/promises';
+import { appendFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -40,6 +40,7 @@ const FALLBACK_MODELS = [
     'gemini-3-pro-preview'
 ];
 const MODEL_TOKEN_REGEX = /\b(?:claude|gpt|gemini|o)[a-z0-9.-]*\b/gi;
+const COPILOT_NOT_INSTALLED_MESSAGE = 'GitHub Copilot CLI is not installed.\n\nInstall: npm install -g @github/copilot';
 
 function parseBoolean(value: string | undefined): boolean | undefined {
     if (!value) {
@@ -54,6 +55,64 @@ function parseBoolean(value: string | undefined): boolean | undefined {
         return false;
     }
     return undefined;
+}
+
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const LOG_LEVELS: Record<LogLevel, number> = {
+    debug: 10,
+    info: 20,
+    warn: 30,
+    error: 40
+};
+
+function normalizeLogLevel(value: string | undefined, debugEnabled: boolean): LogLevel {
+    const normalized = value?.trim().toLowerCase();
+    if (normalized === 'debug' || normalized === 'info' || normalized === 'warn' || normalized === 'error') {
+        return normalized;
+    }
+
+    return debugEnabled ? 'debug' : 'info';
+}
+
+const DEBUG_ENABLED = parseBoolean(process.env.COPILOT_DEBUG) ?? false;
+const LOG_LEVEL = normalizeLogLevel(process.env.COPILOT_LOG_LEVEL, DEBUG_ENABLED);
+const LOG_FILE_PATH = process.env.COPILOT_LOG_FILE?.trim();
+
+function shouldLog(level: LogLevel): boolean {
+    return LOG_LEVELS[level] >= LOG_LEVELS[LOG_LEVEL];
+}
+
+function formatLogEntry(level: LogLevel, message: string, data?: Record<string, unknown>) {
+    return {
+        timestamp: new Date().toISOString(),
+        level,
+        message,
+        ...(data ? { data } : {})
+    };
+}
+
+function logMessage(level: LogLevel, message: string, data?: Record<string, unknown>) {
+    if (!shouldLog(level)) {
+        return;
+    }
+
+    const entry = formatLogEntry(level, message, data);
+
+    if (LOG_FILE_PATH) {
+        appendFile(LOG_FILE_PATH, `${JSON.stringify(entry)}\n`, 'utf8').catch(error => {
+            if (DEBUG_ENABLED) {
+                console.error(
+                    `Warning: Failed to write log file ${LOG_FILE_PATH}: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
+        });
+    }
+
+    if (DEBUG_ENABLED || level === 'warn' || level === 'error') {
+        const payload = data ? ` ${JSON.stringify(data)}` : '';
+        console.error(`[copilot-mcp] ${level}: ${message}${payload}`);
+    }
 }
 
 function getDefaultModel(): string | undefined {
@@ -102,9 +161,10 @@ async function initDirectories() {
             try {
                 await mkdir(dir, { recursive: true });
             } catch (error) {
-                console.error(
-                    `Warning: Failed to create directory ${dir}: ${error instanceof Error ? error.message : String(error)}`
-                );
+                logMessage('warn', 'Failed to create directory', {
+                    directory: dir,
+                    error: error instanceof Error ? error.message : String(error)
+                });
             }
         }
     }
@@ -138,6 +198,7 @@ async function getCopilotHelpOutput(): Promise<string> {
         let stdout = '';
         let stderr = '';
         let settled = false;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
         const finish = (fn: () => void) => {
             if (settled) {
@@ -176,7 +237,7 @@ async function getCopilotHelpOutput(): Promise<string> {
             finish(() => resolve(output));
         });
 
-        const timeoutId = setTimeout(() => {
+        timeoutId = setTimeout(() => {
             child.kill();
             finish(() => reject(new Error('Copilot CLI help command timed out')));
         }, HELP_TIMEOUT_MS);
@@ -211,10 +272,69 @@ async function listCopilotModels(): Promise<{ models: string[]; source: 'help' |
             return { models: parsed, source: 'help' };
         }
     } catch (error) {
-        console.error(`Warning: Failed to parse copilot --help: ${error instanceof Error ? error.message : String(error)}`);
+        logMessage('warn', 'Failed to parse copilot --help', {
+            error: error instanceof Error ? error.message : String(error)
+        });
     }
 
     return { models: FALLBACK_MODELS, source: 'fallback' };
+}
+
+type CopilotCommandMeta = {
+    model?: string;
+    durationMs: number;
+    exitCode?: number;
+    signal?: string;
+    stderrSnippet?: string;
+    timedOut?: boolean;
+};
+
+type CopilotCommandResult = {
+    text: string;
+    meta: CopilotCommandMeta;
+};
+
+function getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+function formatToolErrorMessage(message: string): string {
+    return message.startsWith('Error:') ? message : `Error: ${message}`;
+}
+
+function truncateText(value: string, maxLength: number): string {
+    const trimmed = value.trim();
+    if (trimmed.length <= maxLength) {
+        return trimmed;
+    }
+
+    return trimmed.slice(-maxLength);
+}
+
+function buildToolSuccess(result: CopilotCommandResult): CallToolResult {
+    return {
+        content: [{ type: 'text', text: result.text }],
+        structuredContent: {
+            text: result.text,
+            ...result.meta
+        }
+    };
+}
+
+function buildToolError(message: string, meta?: Partial<CopilotCommandMeta>): CallToolResult {
+    const formatted = formatToolErrorMessage(message);
+    return {
+        content: [{ type: 'text', text: formatted }],
+        structuredContent: {
+            error: message,
+            ...(meta ?? {})
+        },
+        isError: true
+    };
+}
+
+function buildCopilotNotInstalledError(): CallToolResult {
+    return buildToolError(COPILOT_NOT_INSTALLED_MESSAGE);
 }
 
 // Execute Copilot CLI command with options
@@ -227,12 +347,13 @@ async function executeCopilotCommand(
         sessionId?: string;
         additionalArgs?: string[];
     } = {}
-): Promise<string> {
+): Promise<CopilotCommandResult> {
     return new Promise((resolve, reject) => {
         const fullPrompt = options.context ? `${prompt}\n\nContext:\n${options.context}` : prompt;
         const selectedModel = options.model ?? getDefaultModel();
         const allowAllTools = options.allowAllTools ?? getAllowAllToolsDefault();
         const timeoutMs = getTimeoutMs();
+        const startTime = Date.now();
 
         const args: string[] = ['--prompt', fullPrompt, '--silent'];
 
@@ -265,6 +386,10 @@ async function executeCopilotCommand(
         let stderr = '';
         let hasReceivedOutput = false;
         let settled = false;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        let exitCode: number | undefined;
+        let signal: string | undefined;
+        let timedOut = false;
 
         const finish = (fn: () => void) => {
             if (settled) {
@@ -279,6 +404,13 @@ async function executeCopilotCommand(
                 clearTimeout(timeoutId);
             }
         };
+
+        logMessage('debug', 'Copilot command started', {
+            model: selectedModel,
+            allowAllTools,
+            promptLength: fullPrompt.length,
+            hasContext: Boolean(options.context)
+        });
 
         child.stdout.on('data', data => {
             const output = data.toString();
@@ -295,8 +427,10 @@ async function executeCopilotCommand(
             finish(() => reject(new Error(`Failed to execute copilot: ${error.message}`)));
         });
 
-        child.on('exit', () => {
+        child.on('exit', (code, exitSignal) => {
             clearTimeoutId();
+            exitCode = code ?? undefined;
+            signal = exitSignal ?? undefined;
             if (!hasReceivedOutput && stderr) {
                 if (stderr.includes('login') || stderr.includes('authenticate')) {
                     finish(() => reject(new Error('GitHub Copilot CLI requires authentication. Please run: copilot /login')));
@@ -304,28 +438,60 @@ async function executeCopilotCommand(
                 }
             }
 
-            const result = stdout.trim() || stderr.trim() || 'No response from Copilot CLI';
+            const resultText = stdout.trim() || stderr.trim() || 'No response from Copilot CLI';
+            const durationMs = Date.now() - startTime;
+            const stderrSnippet = stderr.trim() ? truncateText(stderr, 400) : undefined;
+            const meta: CopilotCommandMeta = {
+                model: selectedModel,
+                durationMs,
+                exitCode,
+                signal,
+                stderrSnippet,
+                timedOut
+            };
 
             // Save to session history
             if (currentSessionId && sessions.has(currentSessionId)) {
                 const session = sessions.get(currentSessionId)!;
                 session.history.push({
                     prompt: fullPrompt,
-                    response: result,
+                    response: resultText,
                     timestamp: new Date()
                 });
                 session.lastActivity = new Date();
             }
 
-            finish(() => resolve(result));
+            logMessage('info', 'Copilot command finished', {
+                model: selectedModel,
+                durationMs,
+                exitCode,
+                signal,
+                timedOut
+            });
+
+            finish(() => resolve({ text: resultText, meta }));
         });
 
         // Timeout after 60 seconds
-        const timeoutId = setTimeout(() => {
+        timeoutId = setTimeout(() => {
+            timedOut = true;
             child.kill();
 
             if (hasReceivedOutput) {
-                finish(() => resolve(stdout.trim() || 'Copilot CLI timed out, but partial response received'));
+                const durationMs = Date.now() - startTime;
+                const resultText = stdout.trim() || 'Copilot CLI timed out, but partial response received';
+                const stderrSnippet = stderr.trim() ? truncateText(stderr, 400) : undefined;
+                finish(() => resolve({
+                    text: resultText,
+                    meta: {
+                        model: selectedModel,
+                        durationMs,
+                        exitCode,
+                        signal,
+                        stderrSnippet,
+                        timedOut
+                    }
+                }));
             } else {
                 finish(() => reject(new Error('Copilot CLI command timed out with no response')));
             }
@@ -374,19 +540,14 @@ server.registerTool(
         try {
             const isInstalled = await checkCopilotInstalled();
             if (!isInstalled) {
-                return {
-                    content: [{ type: 'text', text: 'Error: GitHub Copilot CLI is not installed.\n\nInstall: npm install -g @github/copilot' }],
-                    isError: true
-                };
+                return buildCopilotNotInstalledError();
             }
 
             const result = await executeCopilotCommand(prompt, { context, model, allowAllTools });
-            return { content: [{ type: 'text', text: result }] };
+            return buildToolSuccess(result);
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-                isError: true
-            };
+            logMessage('error', 'Ask Copilot failed', { error: getErrorMessage(error) });
+            return buildToolError(getErrorMessage(error));
         }
     }
 );
@@ -406,19 +567,14 @@ server.registerTool(
         try {
             const isInstalled = await checkCopilotInstalled();
             if (!isInstalled) {
-                return {
-                    content: [{ type: 'text', text: 'Error: GitHub Copilot CLI is not installed.' }],
-                    isError: true
-                };
+                return buildCopilotNotInstalledError();
             }
 
             const result = await executeCopilotCommand(`Please explain this code:\n\n${code}`, { model });
-            return { content: [{ type: 'text', text: result }] };
+            return buildToolSuccess(result);
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-                isError: true
-            };
+            logMessage('error', 'Copilot explain failed', { error: getErrorMessage(error) });
+            return buildToolError(getErrorMessage(error));
         }
     }
 );
@@ -438,19 +594,14 @@ server.registerTool(
         try {
             const isInstalled = await checkCopilotInstalled();
             if (!isInstalled) {
-                return {
-                    content: [{ type: 'text', text: 'Error: GitHub Copilot CLI is not installed.' }],
-                    isError: true
-                };
+                return buildCopilotNotInstalledError();
             }
 
             const result = await executeCopilotCommand(`Suggest a command for: ${task}`, { model });
-            return { content: [{ type: 'text', text: result }] };
+            return buildToolSuccess(result);
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-                isError: true
-            };
+            logMessage('error', 'Copilot suggest failed', { error: getErrorMessage(error) });
+            return buildToolError(getErrorMessage(error));
         }
     }
 );
@@ -467,10 +618,7 @@ server.registerTool(
         try {
             const isInstalled = await checkCopilotInstalled();
             if (!isInstalled) {
-                return {
-                    content: [{ type: 'text', text: 'Error: GitHub Copilot CLI is not installed.' }],
-                    isError: true
-                };
+                return buildCopilotNotInstalledError();
             }
 
             const { models, source } = await listCopilotModels();
@@ -480,12 +628,13 @@ server.registerTool(
             const body = models.map(model => `- ${model}`).join('\n');
             const text = `${header}\n${body}`;
 
-            return { content: [{ type: 'text', text }] };
-        } catch (error) {
             return {
-                content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-                isError: true
+                content: [{ type: 'text', text }],
+                structuredContent: { models, source }
             };
+        } catch (error) {
+            logMessage('error', 'Copilot list models failed', { error: getErrorMessage(error) });
+            return buildToolError(getErrorMessage(error));
         }
     }
 );
@@ -506,20 +655,15 @@ server.registerTool(
         try {
             const isInstalled = await checkCopilotInstalled();
             if (!isInstalled) {
-                return {
-                    content: [{ type: 'text', text: 'Error: GitHub Copilot CLI is not installed.' }],
-                    isError: true
-                };
+                return buildCopilotNotInstalledError();
             }
 
             const prompt = `Debug this code:\n\n${code}\n\nError: ${error}`;
             const result = await executeCopilotCommand(prompt, { context });
-            return { content: [{ type: 'text', text: result }] };
+            return buildToolSuccess(result);
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-                isError: true
-            };
+            logMessage('error', 'Copilot debug failed', { error: getErrorMessage(error) });
+            return buildToolError(getErrorMessage(error));
         }
     }
 );
@@ -539,22 +683,17 @@ server.registerTool(
         try {
             const isInstalled = await checkCopilotInstalled();
             if (!isInstalled) {
-                return {
-                    content: [{ type: 'text', text: 'Error: GitHub Copilot CLI is not installed.' }],
-                    isError: true
-                };
+                return buildCopilotNotInstalledError();
             }
 
             const prompt = goal
                 ? `Refactor this code to ${goal}:\n\n${code}`
                 : `Refactor and improve this code:\n\n${code}`;
             const result = await executeCopilotCommand(prompt);
-            return { content: [{ type: 'text', text: result }] };
+            return buildToolSuccess(result);
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-                isError: true
-            };
+            logMessage('error', 'Copilot refactor failed', { error: getErrorMessage(error) });
+            return buildToolError(getErrorMessage(error));
         }
     }
 );
@@ -574,22 +713,17 @@ server.registerTool(
         try {
             const isInstalled = await checkCopilotInstalled();
             if (!isInstalled) {
-                return {
-                    content: [{ type: 'text', text: 'Error: GitHub Copilot CLI is not installed.' }],
-                    isError: true
-                };
+                return buildCopilotNotInstalledError();
             }
 
             const prompt = framework
                 ? `Generate ${framework} tests for this code:\n\n${code}`
                 : `Generate unit tests for this code:\n\n${code}`;
             const result = await executeCopilotCommand(prompt);
-            return { content: [{ type: 'text', text: result }] };
+            return buildToolSuccess(result);
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-                isError: true
-            };
+            logMessage('error', 'Copilot test generate failed', { error: getErrorMessage(error) });
+            return buildToolError(getErrorMessage(error));
         }
     }
 );
@@ -609,22 +743,17 @@ server.registerTool(
         try {
             const isInstalled = await checkCopilotInstalled();
             if (!isInstalled) {
-                return {
-                    content: [{ type: 'text', text: 'Error: GitHub Copilot CLI is not installed.' }],
-                    isError: true
-                };
+                return buildCopilotNotInstalledError();
             }
 
             const prompt = focusAreas && focusAreas.length > 0
                 ? `Review this code, focusing on ${focusAreas.join(', ')}:\n\n${code}`
                 : `Review this code:\n\n${code}`;
             const result = await executeCopilotCommand(prompt);
-            return { content: [{ type: 'text', text: result }] };
+            return buildToolSuccess(result);
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-                isError: true
-            };
+            logMessage('error', 'Copilot review failed', { error: getErrorMessage(error) });
+            return buildToolError(getErrorMessage(error));
         }
     }
 );
