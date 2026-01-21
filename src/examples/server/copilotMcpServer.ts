@@ -21,6 +21,63 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 const COPILOT_COMMAND = 'copilot';
+const DEFAULT_TIMEOUT_MS = 60000;
+const HELP_TIMEOUT_MS = 5000;
+const FALLBACK_MODELS = [
+    'claude-sonnet-4.5',
+    'claude-haiku-4.5',
+    'claude-opus-4.5',
+    'claude-sonnet-4',
+    'gpt-5.2-codex',
+    'gpt-5.1-codex-max',
+    'gpt-5.1-codex',
+    'gpt-5.2',
+    'gpt-5.1',
+    'gpt-5',
+    'gpt-5.1-codex-mini',
+    'gpt-5-mini',
+    'gpt-4.1',
+    'gemini-3-pro-preview'
+];
+const MODEL_TOKEN_REGEX = /\b(?:claude|gpt|gemini|o)[a-z0-9.-]*\b/gi;
+
+function parseBoolean(value: string | undefined): boolean | undefined {
+    if (!value) {
+        return undefined;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) {
+        return true;
+    }
+    if (['false', '0', 'no', 'n', 'off'].includes(normalized)) {
+        return false;
+    }
+    return undefined;
+}
+
+function getDefaultModel(): string | undefined {
+    const model = process.env.COPILOT_MODEL?.trim();
+    return model ? model : undefined;
+}
+
+function getAllowAllToolsDefault(): boolean {
+    return parseBoolean(process.env.COPILOT_ALLOW_ALL_TOOLS) ?? false;
+}
+
+function getTimeoutMs(): number {
+    const timeoutValue = process.env.COPILOT_TIMEOUT;
+    if (!timeoutValue) {
+        return DEFAULT_TIMEOUT_MS;
+    }
+
+    const parsed = Number.parseInt(timeoutValue, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+    }
+
+    return DEFAULT_TIMEOUT_MS;
+}
 
 // Session management
 interface CopilotSession {
@@ -71,6 +128,96 @@ async function checkCopilotInstalled(): Promise<boolean> {
     });
 }
 
+async function getCopilotHelpOutput(): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const child = spawn(COPILOT_COMMAND, ['--help'], {
+            shell: true,
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        let stdout = '';
+        let stderr = '';
+        let settled = false;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+        const finish = (fn: () => void) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            fn();
+        };
+
+        const clearTimeoutId = () => {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
+        };
+
+        child.stdout.on('data', data => {
+            stdout += data.toString();
+        });
+
+        child.stderr.on('data', data => {
+            stderr += data.toString();
+        });
+
+        child.on('error', error => {
+            clearTimeoutId();
+            finish(() => reject(new Error(`Failed to execute copilot --help: ${error.message}`)));
+        });
+
+        child.on('exit', () => {
+            clearTimeoutId();
+            const output = stdout.trim() || stderr.trim();
+            if (!output) {
+                finish(() => reject(new Error('No output from copilot --help')));
+                return;
+            }
+            finish(() => resolve(output));
+        });
+
+        timeoutId = setTimeout(() => {
+            child.kill();
+            finish(() => reject(new Error('Copilot CLI help command timed out')));
+        }, HELP_TIMEOUT_MS);
+    });
+}
+
+function parseModelsFromHelpOutput(helpText: string): string[] {
+    const matches = helpText.match(MODEL_TOKEN_REGEX) ?? [];
+    const seen = new Set<string>();
+    const models: string[] = [];
+
+    for (const match of matches) {
+        const token = match.toLowerCase();
+        if (!/\d/.test(token)) {
+            continue;
+        }
+        if (seen.has(token)) {
+            continue;
+        }
+        seen.add(token);
+        models.push(token);
+    }
+
+    return models;
+}
+
+async function listCopilotModels(): Promise<{ models: string[]; source: 'help' | 'fallback' }> {
+    try {
+        const helpOutput = await getCopilotHelpOutput();
+        const parsed = parseModelsFromHelpOutput(helpOutput);
+        if (parsed.length > 0) {
+            return { models: parsed, source: 'help' };
+        }
+    } catch (error) {
+        console.error(`Warning: Failed to parse copilot --help: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    return { models: FALLBACK_MODELS, source: 'fallback' };
+}
+
 // Execute Copilot CLI command with options
 async function executeCopilotCommand(
     prompt: string,
@@ -84,16 +231,19 @@ async function executeCopilotCommand(
 ): Promise<string> {
     return new Promise((resolve, reject) => {
         const fullPrompt = options.context ? `${prompt}\n\nContext:\n${options.context}` : prompt;
+        const selectedModel = options.model ?? getDefaultModel();
+        const allowAllTools = options.allowAllTools ?? getAllowAllToolsDefault();
+        const timeoutMs = getTimeoutMs();
 
         const args: string[] = ['--prompt', fullPrompt, '--silent'];
 
         // Add model selection
-        if (options.model) {
-            args.push('--model', options.model);
+        if (selectedModel) {
+            args.push('--model', selectedModel);
         }
 
         // Add tool permissions
-        if (options.allowAllTools) {
+        if (allowAllTools) {
             args.push('--allow-all-tools');
         }
 
@@ -181,7 +331,7 @@ async function executeCopilotCommand(
             } else {
                 finish(() => reject(new Error('Copilot CLI command timed out with no response')));
             }
-        }, 60000);
+        }, timeoutMs);
     });
 }
 
@@ -307,7 +457,42 @@ server.registerTool(
     }
 );
 
-// 4. Debug Code
+// 4. List Models
+server.registerTool(
+    'copilot-list-models',
+    {
+        title: 'List Copilot Models',
+        description: 'List available GitHub Copilot CLI model identifiers',
+        inputSchema: {}
+    },
+    async (): Promise<CallToolResult> => {
+        try {
+            const isInstalled = await checkCopilotInstalled();
+            if (!isInstalled) {
+                return {
+                    content: [{ type: 'text', text: 'Error: GitHub Copilot CLI is not installed.' }],
+                    isError: true
+                };
+            }
+
+            const { models, source } = await listCopilotModels();
+            const header = source === 'help'
+                ? 'Available Copilot models (from copilot --help):'
+                : 'Available Copilot models (fallback list):';
+            const body = models.map(model => `- ${model}`).join('\n');
+            const text = `${header}\n${body}`;
+
+            return { content: [{ type: 'text', text }] };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+// 5. Debug Code
 server.registerTool(
     'copilot-debug',
     {
@@ -341,7 +526,7 @@ server.registerTool(
     }
 );
 
-// 5. Refactor Code
+// 6. Refactor Code
 server.registerTool(
     'copilot-refactor',
     {
@@ -376,7 +561,7 @@ server.registerTool(
     }
 );
 
-// 6. Generate Tests
+// 7. Generate Tests
 server.registerTool(
     'copilot-test-generate',
     {
@@ -411,7 +596,7 @@ server.registerTool(
     }
 );
 
-// 7. Review Code
+// 8. Review Code
 server.registerTool(
     'copilot-review',
     {
@@ -446,7 +631,7 @@ server.registerTool(
     }
 );
 
-// 8. Session Management
+// 9. Session Management
 server.registerTool(
     'copilot-session-start',
     {
@@ -686,7 +871,7 @@ async function main() {
 
     console.error('✅ Server running on stdio');
     console.error('📦 Features enabled:');
-    console.error('   - 8 Tools (ask, explain, suggest, debug, refactor, test, review, session)');
+    console.error('   - 9 Tools (ask, explain, suggest, list-models, debug, refactor, test, review, session)');
     console.error('   - 2 Resources (session history, sessions list)');
     console.error('   - 3 Prompts (code review, debug, refactor templates)');
     console.error('Waiting for requests...\n');
