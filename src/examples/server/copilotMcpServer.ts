@@ -23,6 +23,7 @@ import { join } from 'path';
 const COPILOT_COMMAND = 'copilot';
 const DEFAULT_TIMEOUT_MS = 60000;
 const HELP_TIMEOUT_MS = 5000;
+const DEFAULT_MAX_PROMPT_BYTES = 24000;
 const FALLBACK_MODELS = [
     'claude-sonnet-4.5',
     'claude-haiku-4.5',
@@ -136,6 +137,24 @@ function getTimeoutMs(): number {
     }
 
     return DEFAULT_TIMEOUT_MS;
+}
+
+function getMaxPromptBytes(): number {
+    const maxValue = process.env.COPILOT_MAX_PROMPT_BYTES;
+    if (!maxValue) {
+        return DEFAULT_MAX_PROMPT_BYTES;
+    }
+
+    const parsed = Number.parseInt(maxValue, 10);
+    if (!Number.isFinite(parsed)) {
+        return DEFAULT_MAX_PROMPT_BYTES;
+    }
+
+    if (parsed <= 0) {
+        return Number.POSITIVE_INFINITY;
+    }
+
+    return parsed;
 }
 
 // Session management
@@ -351,7 +370,23 @@ async function executeCopilotCommand(
         const selectedModel = options.model ?? getDefaultModel();
         const allowAllTools = options.allowAllTools ?? getAllowAllToolsDefault();
         const timeoutMs = getTimeoutMs();
+        const maxPromptBytes = getMaxPromptBytes();
         const startTime = Date.now();
+
+        const promptBytes = Buffer.byteLength(fullPrompt, 'utf8');
+        if (Number.isFinite(maxPromptBytes) && promptBytes > maxPromptBytes) {
+            logMessage('warn', 'Prompt exceeds configured max length', {
+                promptBytes,
+                maxPromptBytes
+            });
+            reject(
+                new Error(
+                    `Prompt is ${promptBytes} bytes; exceeds COPILOT_MAX_PROMPT_BYTES (${maxPromptBytes}). ` +
+                        'Reduce input size or increase the limit.'
+                )
+            );
+            return;
+        }
 
         const args: string[] = ['--prompt', fullPrompt, '--silent'];
 
