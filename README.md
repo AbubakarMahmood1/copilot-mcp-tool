@@ -17,7 +17,7 @@ A Model Context Protocol (MCP) server that integrates GitHub Copilot CLI with MC
 - **9 Tools** - Interactive Copilot commands for coding assistance
 - **2 Resources** - Session history and management
 - **3 Prompts** - Workflow templates for common tasks
-- **Full MCP Support** - Compatible with Claude Desktop, Claude Code, Cline, and more
+- **Full MCP Support** - Compatible with Claude Desktop, Claude Code, Codex, Cline, and more
 
 ## Quick Start
 
@@ -172,6 +172,35 @@ claude mcp list
 **Usage in Chat:**
 ```bash
 /mcp  # Check server status
+```
+
+---
+
+### 🤖 Codex CLI
+
+Codex CLI supports MCP via a simple command.
+
+**Quick Setup (npx):**
+```bash
+codex mcp add copilot -- npx -y @leonardommello/copilot-mcp-server
+```
+
+**Use your fork (GitHub npx):**
+```bash
+codex mcp add copilot -- npx -y github:YOUR_USERNAME/copilot-mcp-tool
+```
+
+**Local Development:**
+```bash
+# Build first
+npm run build
+
+codex mcp add copilot -- node "/absolute/path/to/copilot-mcp-tool/dist/esm/examples/server/copilotMcpServer.js"
+```
+
+**Verify Connection:**
+```bash
+codex mcp list
 ```
 
 ---
@@ -336,6 +365,7 @@ This server is compatible with **any MCP-compliant client**. Generic configurati
 **Additional Compatible Clients:**
 - **Amp** - Configuration in `~/.amp/mcp.json`
 - **Augment Code** - MCP settings in IDE
+- **Codex CLI** - CLI: `codex mcp add copilot`
 - **Roo Code** - Via settings panel
 - **Qwen Coder** - CLI: `qwen mcp add copilot`
 
@@ -347,6 +377,7 @@ This server is compatible with **any MCP-compliant client**. Generic configurati
 |--------|--------|-------------------|-------|
 | [Claude Desktop](https://claude.ai/download) | ✅ **Tested** | JSON config | Most stable, recommended |
 | [Claude Code](https://docs.claude.com/en/docs/claude-code) | ✅ **Tested** | CLI command | Fastest setup |
+| [Codex CLI](https://developers.openai.com/codex/cli) | ✅ **Tested** | CLI command | Works with stdio MCP servers |
 | [Cursor](https://cursor.sh/) | ✅ Compatible | JSON / UI | Multiple setup options |
 | [Cline (VS Code)](https://github.com/cline/cline) | ✅ Compatible | Extension settings | VS Code integration |
 | [Zed](https://zed.dev/) | ✅ Compatible | Native MCP support | Built-in UI |
