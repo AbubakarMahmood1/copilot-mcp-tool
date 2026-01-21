@@ -189,6 +189,7 @@ codex mcp add copilot -- npx -y @leonardommello/copilot-mcp-server
 ```bash
 codex mcp add copilot -- npx -y github:YOUR_USERNAME/copilot-mcp-tool
 ```
+Note: `npx -y @YOUR_USERNAME/copilot-mcp-tool` only works if you published to npm. For GitHub forks, use the `github:` form. If needed, append the bin name: `... github:YOUR_USERNAME/copilot-mcp-tool copilot-mcp-server`.
 
 **Local Development:**
 ```bash
@@ -223,6 +224,7 @@ Edit `~/.cursor/mcp.json` (create if it doesn't exist):
   }
 }
 ```
+For forks, replace the package with `github:YOUR_USERNAME/copilot-mcp-tool` in the args array.
 
 **Method 2: Settings UI**
 1. Open Cursor Settings (Cmd/Ctrl + ,)
