@@ -174,7 +174,6 @@ async function initDirectories() {
 async function checkCopilotInstalled(): Promise<boolean> {
     return new Promise(resolve => {
         const child = spawn(COPILOT_COMMAND, ['--version'], {
-            shell: true,
             stdio: 'pipe'
         });
 
@@ -191,7 +190,6 @@ async function checkCopilotInstalled(): Promise<boolean> {
 async function getCopilotHelpOutput(): Promise<string> {
     return new Promise((resolve, reject) => {
         const child = spawn(COPILOT_COMMAND, ['--help'], {
-            shell: true,
             stdio: ['ignore', 'pipe', 'pipe']
         });
 
@@ -378,7 +376,6 @@ async function executeCopilotCommand(
         }
 
         const child = spawn(COPILOT_COMMAND, args, {
-            shell: true,
             stdio: ['ignore', 'pipe', 'pipe']
         });
 
