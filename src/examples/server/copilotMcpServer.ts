@@ -20,6 +20,8 @@ import { existsSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
+const COPILOT_COMMAND = 'copilot';
+
 // Session management
 interface CopilotSession {
     id: string;
@@ -40,7 +42,13 @@ const sessionsDir = join(copilotDir, 'mcp-sessions');
 async function initDirectories() {
     for (const dir of [copilotDir, logsDir, sessionsDir]) {
         if (!existsSync(dir)) {
-            await mkdir(dir, { recursive: true });
+            try {
+                await mkdir(dir, { recursive: true });
+            } catch (error) {
+                console.error(
+                    `Warning: Failed to create directory ${dir}: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
         }
     }
 }
@@ -48,7 +56,7 @@ async function initDirectories() {
 // Check if Copilot CLI is installed
 async function checkCopilotInstalled(): Promise<boolean> {
     return new Promise(resolve => {
-        const child = spawn('copilot', ['--version'], {
+        const child = spawn(COPILOT_COMMAND, ['--version'], {
             shell: true,
             stdio: 'pipe'
         });
@@ -77,7 +85,7 @@ async function executeCopilotCommand(
     return new Promise((resolve, reject) => {
         const fullPrompt = options.context ? `${prompt}\n\nContext:\n${options.context}` : prompt;
 
-        const args: string[] = [];
+        const args: string[] = ['--prompt', fullPrompt, '--silent'];
 
         // Add model selection
         if (options.model) {
@@ -99,14 +107,30 @@ async function executeCopilotCommand(
             args.push(...options.additionalArgs);
         }
 
-        const child = spawn('copilot', args, {
+        const child = spawn(COPILOT_COMMAND, args, {
             shell: true,
-            stdio: ['pipe', 'pipe', 'pipe']
+            stdio: ['ignore', 'pipe', 'pipe']
         });
 
         let stdout = '';
         let stderr = '';
         let hasReceivedOutput = false;
+        let settled = false;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+        const finish = (fn: () => void) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            fn();
+        };
+
+        const clearTimeoutId = () => {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
+        };
 
         child.stdout.on('data', data => {
             const output = data.toString();
@@ -119,32 +143,15 @@ async function executeCopilotCommand(
         });
 
         child.on('error', error => {
-            reject(new Error(`Failed to execute copilot: ${error.message}`));
+            clearTimeoutId();
+            finish(() => reject(new Error(`Failed to execute copilot: ${error.message}`)));
         });
 
-        // Wait for copilot to start, then send the prompt
-        setTimeout(() => {
-            try {
-                if (child.stdin.writable) {
-                    child.stdin.write(fullPrompt + '\n');
-
-                    // Send exit command after waiting for response
-                    setTimeout(() => {
-                        if (child.stdin.writable) {
-                            child.stdin.write('/exit\n');
-                            child.stdin.end();
-                        }
-                    }, 5000);
-                }
-            } catch (error) {
-                reject(error);
-            }
-        }, 1000);
-
         child.on('exit', () => {
+            clearTimeoutId();
             if (!hasReceivedOutput && stderr) {
                 if (stderr.includes('login') || stderr.includes('authenticate')) {
-                    reject(new Error('GitHub Copilot CLI requires authentication. Please run: copilot /login'));
+                    finish(() => reject(new Error('GitHub Copilot CLI requires authentication. Please run: copilot /login')));
                     return;
                 }
             }
@@ -162,20 +169,17 @@ async function executeCopilotCommand(
                 session.lastActivity = new Date();
             }
 
-            resolve(result);
+            finish(() => resolve(result));
         });
 
         // Timeout after 60 seconds
-        setTimeout(() => {
-            if (child.stdin.writable) {
-                child.stdin.write('/exit\n');
-            }
+        timeoutId = setTimeout(() => {
             child.kill();
 
             if (hasReceivedOutput) {
-                resolve(stdout.trim() || 'Copilot CLI timed out, but partial response received');
+                finish(() => resolve(stdout.trim() || 'Copilot CLI timed out, but partial response received'));
             } else {
-                reject(new Error('Copilot CLI command timed out with no response'));
+                finish(() => reject(new Error('Copilot CLI command timed out with no response')));
             }
         }, 60000);
     });
@@ -214,7 +218,7 @@ server.registerTool(
         inputSchema: {
             prompt: z.string().describe('The question or task to ask GitHub Copilot CLI'),
             context: z.string().optional().describe('Optional additional context (file paths, code snippets, etc.)'),
-            model: z.enum(['claude-sonnet-4.5', 'claude-sonnet-4', 'claude-haiku-4.5', 'gpt-5']).optional().describe('AI model to use'),
+            model: z.string().optional().describe('AI model to use'),
             allowAllTools: z.boolean().optional().describe('Allow all tools to run automatically without confirmation')
         }
     },
@@ -247,7 +251,7 @@ server.registerTool(
         description: 'Get detailed explanations of code or technical concepts',
         inputSchema: {
             code: z.string().describe('The code or concept to explain'),
-            model: z.enum(['claude-sonnet-4.5', 'claude-sonnet-4', 'claude-haiku-4.5', 'gpt-5']).optional().describe('AI model to use')
+            model: z.string().optional().describe('AI model to use')
         }
     },
     async ({ code, model }): Promise<CallToolResult> => {
@@ -279,7 +283,7 @@ server.registerTool(
         description: 'Get CLI command suggestions for specific tasks',
         inputSchema: {
             task: z.string().describe('The task you want to accomplish'),
-            model: z.enum(['claude-sonnet-4.5', 'claude-sonnet-4', 'claude-haiku-4.5', 'gpt-5']).optional().describe('AI model to use')
+            model: z.string().optional().describe('AI model to use')
         }
     },
     async ({ task, model }): Promise<CallToolResult> => {
