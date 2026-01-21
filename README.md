@@ -54,6 +54,7 @@ copilot /login
 | **ask-copilot** | Ask Copilot for coding help, debugging, architecture | `prompt`, `context`, `model`, `allowAllTools` |
 | **copilot-explain** | Get detailed code explanations | `code`, `model` |
 | **copilot-suggest** | Get CLI command suggestions | `task`, `model` |
+| **copilot-list-models** | List available Copilot CLI models | - |
 | **copilot-debug** | Debug code errors | `code`, `error`, `context` |
 | **copilot-refactor** | Get refactoring suggestions | `code`, `goal` |
 | **copilot-test-generate** | Generate unit tests | `code`, `framework` |
@@ -569,6 +570,13 @@ const memoize = fn => {
 🤖 Linux: find . -name "*.ts" -mtime -7
 ```
 
+### copilot-list-models
+**Available Copilot model identifiers**
+
+```
+Use copilot-list-models to list available Copilot CLI models
+```
+
 ### copilot-debug
 **Bug identification and fixes**
 
@@ -660,6 +668,11 @@ Use copilot-debug with code="function sum(arr) { return arr.reduce((a) => a+b, 0
 Use copilot-test-generate with code="function isPrime(n) { return n > 1 && ![...Array(n).keys()].slice(2).some(i => n % i === 0); }" and framework="jest"
 ```
 
+**List Models:**
+```
+Use copilot-list-models to list available Copilot CLI models
+```
+
 **Review Code:**
 ```
 Use copilot-review with code="..." and focusAreas=["security", "performance"]
@@ -675,11 +688,8 @@ Use copilot-session-history to view conversation history
 
 ## AI Models
 
-Select from available models:
-- `claude-sonnet-4.5` (default)
-- `claude-sonnet-4`
-- `claude-haiku-4.5`
-- `gpt-5`
+Use `copilot-list-models` to see the latest models available from your Copilot CLI installation.
+If `COPILOT_MODEL` is set, that model is used by default.
 
 Example:
 ```
@@ -687,6 +697,17 @@ Use ask-copilot with model="gpt-5" and prompt="Explain async/await"
 ```
 
 ---
+
+## Configuration
+
+Environment variables for defaults and logging:
+
+- `COPILOT_MODEL`: default model identifier
+- `COPILOT_TIMEOUT`: timeout in milliseconds (default: 60000)
+- `COPILOT_ALLOW_ALL_TOOLS`: default allow-all-tools policy (`true` or `false`)
+- `COPILOT_LOG_FILE`: write JSON line logs to this file path
+- `COPILOT_LOG_LEVEL`: `debug`, `info`, `warn`, or `error` (default: `info`)
+- `COPILOT_DEBUG`: enable stderr debug logs (`true` or `false`)
 
 ## Requirements
 
